@@ -2,19 +2,14 @@
   "version": 2,
   "builds": [
     {
-      "src": "index.jsx",
-      "use": "@vercel/node"
-    },
-    {
-      "src": "package.json",
-      "use": "@vercel/static-build",
-      "config": { "includeFiles": ["index.jsx"] }
+      "src": "App.jsx",
+      "use": "@vercel/static-file"
     }
   ],
   "routes": [
     {
       "src": "/.*",
-      "dest": "index.jsx"
+      "dest": "/App.jsx"
     }
   ]
 }
