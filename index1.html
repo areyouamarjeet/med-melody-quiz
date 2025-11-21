@@ -1,0 +1,1293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width,initial-scale=1.0"
+  />
+  <title>Cerebrexia '25 - Med Melody</title>
+
+  <!-- Tailwind CDN (ok for a small app). For heavy use consider pre-building. -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React & ReactDOM - PRODUCTION builds -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+
+  <!-- Babel (needed because we’re using type="text/babel") -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Firebase v8 UMD SDKs -->
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
+
+  <style>
+    @import url("https://fonts.googleapis.com/css2?family=Montserrat:wght@700&family=Roboto:wght@400;700&display=swap");
+    body {
+      font-family: "Roboto", sans-serif;
+      background-color: #e0f2f1;
+    }
+    .font-brand {
+      font-family: "Montserrat", sans-serif;
+    }
+    .pulse-heart {
+      animation: pulse-heart 1.5s infinite;
+    }
+    @keyframes pulse-heart {
+      0%,
+      100% {
+        transform: scale(1);
+      }
+      50% {
+        transform: scale(1.05);
+      }
+    }
+    .table-responsive td {
+      word-break: break-word;
+      white-space: normal;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useMemo } = React;
+
+    // --- CONFIGURATION ---
+    const HOST_AUTH_CODE = "CEREBREXIA2025";
+    const TEAM_AUTH_CODE = "CEREBREXIA25";
+    const QUESTION_DURATION_SECONDS = 60;
+    const TOTAL_QUESTIONS = 10;
+
+    // Firebase configuration
+    const FIREBASE_CONFIG = {
+      apiKey: "AIzaSyC8FW-D3XFjjbNi2AtmkuAbOmpH6mRXNjM",
+      authDomain: "cerebrexia-quiz.firebaseapp.com",
+      projectId: "cerebrexia-quiz",
+      storageBucket: "cerebrexia-quiz.firebasestorage.app",
+      appId: "1:348160751988:web:78b94d52d996cb79ffd421",
+      messagingSenderId: "348160751988",
+    };
+
+    // --- FIREBASE INITIALIZATION & ACCESSOR HOOKS (V8 COMPATIBILITY) ---
+    let globalDb = null;
+    let globalAuth = null;
+
+    const APP_ID = "cerebrexia-quiz-live";
+
+    const generateSimpleUID = () =>
+      Math.random().toString(36).substring(2, 15) +
+      Math.random().toString(36).substring(2, 15);
+
+    const getPaths = (dbInstance) => {
+      if (!dbInstance) return {};
+      const PUBLIC_PATH = `artifacts/${APP_ID}/public/data`;
+      return {
+        GAME_STATE_DOC_REF: dbInstance.doc(`${PUBLIC_PATH}/game-state/master`),
+        TEAMS_COLLECTION_REF: dbInstance.collection(`${PUBLIC_PATH}/teams`),
+        SUBMISSIONS_COLLECTION_REF: dbInstance.collection(
+          `${PUBLIC_PATH}/submissions`
+        ),
+      };
+    };
+
+    function useFirebaseInitialization() {
+      const [services, setServices] = useState({ db: null, auth: null });
+      const [userId, setUserId] = useState(null);
+      const [isAuthReady, setIsAuthReady] = useState(false);
+
+      useEffect(() => {
+        if (window.firebase && !globalDb) {
+          try {
+            const app = window.firebase.initializeApp(FIREBASE_CONFIG);
+            globalAuth = app.auth();
+            globalDb = app.firestore();
+            globalDb.settings({ timestampsInSnapshots: true });
+
+            setServices({ db: globalDb, auth: globalAuth });
+
+            const docRef = globalDb.doc(
+              `artifacts/${APP_ID}/public/data/game-state/master`
+            );
+
+            const unsubscribeAuth = globalAuth.onAuthStateChanged(
+              async (user) => {
+                if (user) {
+                  setUserId(user.uid);
+                  setIsAuthReady(true);
+                  console.log("User authenticated:", user.uid);
+
+                  const checkAndInitGameState = async () => {
+                    if (!globalDb) return;
+                    try {
+                      const docSnap = await docRef.get();
+                      if (!docSnap.exists) {
+                        await docRef.set({
+                          status: "lobby",
+                          currentQuestionIndex: -1,
+                          questionStartTime: 0,
+                          currentQuestionText: "Awaiting Host Start",
+                          lastUpdate:
+                            firebase.firestore.FieldValue.serverTimestamp(),
+                        });
+                      }
+                    } catch (e) {
+                      console.error("Error initializing game state:", e);
+                    }
+                  };
+                  checkAndInitGameState();
+                } else {
+                  try {
+                    await globalAuth.signInAnonymously();
+                  } catch (error) {
+                    console.error("Authentication failed:", error);
+                    setUserId(generateSimpleUID());
+                    setIsAuthReady(true);
+                  }
+                }
+              }
+            );
+
+            return () => unsubscribeAuth();
+          } catch (e) {
+            console.error("Firebase Initialization Error:", e);
+          }
+        }
+      }, []);
+
+      return {
+        db: services.db,
+        auth: services.auth,
+        userId,
+        isAuthReady,
+        ...getPaths(services.db),
+      };
+    }
+
+    // --- UTILITY COMPONENTS ---
+
+    const LoadingSpinner = () => (
+      <div className="flex flex-col items-center justify-center p-8 min-h-screen bg-[#E0F2F1]">
+        <div className="animate-spin rounded-full h-12 w-12 border-4 border-t-4 border-[#FF6B6B] border-opacity-75"></div>
+        <p className="mt-4 text-[#263238] text-lg font-bold">
+          Connecting to Med-Melody...
+        </p>
+      </div>
+    );
+
+    const MessageBox = ({ title, message, icon }) => (
+      <div className="bg-white/90 p-6 rounded-xl shadow-lg border-2 border-[#FFC107] max-w-sm mx-auto backdrop-blur-sm">
+        <div className="flex items-center space-x-4">
+          {icon}
+          <div>
+            <h3 className="text-xl font-bold text-[#FF6B6B]">{title}</h3>
+            <p className="text-[#455A64] mt-1">{message}</p>
+          </div>
+        </div>
+      </div>
+    );
+
+    // --- DESIGN ELEMENTS ---
+    const HeartBeatAnimation = () => (
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-0">
+        <svg
+          className="w-96 h-96 opacity-10 pulse-heart"
+          viewBox="0 0 24 24"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"
+            fill="#E91E63"
+          />
+        </svg>
+      </div>
+    );
+
+    const MedMelodyLogo = () => (
+      <div className="text-center my-6">
+        <h2 className="text-5xl font-['Brush Script MT'] text-[#E91E63] drop-shadow-lg">
+          MedMelody
+        </h2>
+        <p className="text-2xl font-['Georgia'] text-[#4CAF50] drop-shadow">
+          Song Se Syndrome
+        </p>
+      </div>
+    );
+
+    const formatTime = (ms) => {
+      if (ms === 0) return "00:00.000";
+      const seconds = Math.floor(ms / 1000);
+      const m = Math.floor(seconds / 60);
+      const s = seconds % 60;
+      const msRemainder = ms % 1000;
+      return `${m.toString().padStart(2, "0")}:${s
+        .toString()
+        .padStart(2, "0")}.${msRemainder.toString().padStart(3, "0")}`;
+    };
+
+    // --- HOST SCREEN ---
+
+    const HostScreen = ({
+      userId,
+      db,
+      isAuthReady,
+      GAME_STATE_DOC_REF,
+      TEAMS_COLLECTION_REF,
+      SUBMISSIONS_COLLECTION_REF,
+    }) => {
+      const [gameState, setGameState] = useState(null);
+      const [teams, setTeams] = useState([]);
+      const [submissions, setSubmissions] = useState([]);
+      const [timer, setTimer] = useState(QUESTION_DURATION_SECONDS);
+
+      const [newQuestionText, setNewQuestionText] = useState("");
+
+      const startNextQuestion = useCallback(async () => {
+        if (!GAME_STATE_DOC_REF || !db || !isAuthReady) return;
+
+        const nextIndex = (gameState?.currentQuestionIndex || -1) + 1;
+
+        if (nextIndex >= TOTAL_QUESTIONS) {
+          try {
+            await GAME_STATE_DOC_REF.set(
+              {
+                status: "results",
+                currentQuestionIndex: nextIndex,
+                questionStartTime: 0,
+                currentQuestionText: "Screening Round Complete!",
+                lastUpdate:
+                  firebase.firestore.FieldValue.serverTimestamp(),
+              },
+              { merge: true }
+            );
+            console.log("All screening questions completed.");
+          } catch (e) {
+            console.error("Error setting game to results state:", e);
+          }
+          return;
+        }
+
+        const questionText =
+          newQuestionText.trim() ||
+          `Song ${nextIndex + 1} Diagnosis?`;
+
+        if (nextIndex === 0 && !questionText) {
+          window.confirm(
+            "Please enter the question text before starting the first question."
+          );
+          return;
+        }
+
+        try {
+          await GAME_STATE_DOC_REF.set({
+            status: "question",
+            currentQuestionIndex: nextIndex,
+            questionStartTime:
+              firebase.firestore.FieldValue.serverTimestamp(),
+            currentQuestionText: questionText,
+            lastUpdate:
+              firebase.firestore.FieldValue.serverTimestamp(),
+          });
+          console.log(`Question ${nextIndex + 1} started.`);
+        } catch (e) {
+          console.error("Error starting question:", e);
+        }
+      }, [GAME_STATE_DOC_REF, gameState, newQuestionText, db, isAuthReady]);
+
+      // AUTO-ADVANCE LOGIC
+      useEffect(() => {
+        if (
+          !gameState ||
+          gameState.status !== "question" ||
+          !gameState.questionStartTime
+        ) {
+          setTimer(QUESTION_DURATION_SECONDS);
+          return;
+        }
+
+        const startTimestamp = gameState.questionStartTime.toMillis
+          ? gameState.questionStartTime.toMillis()
+          : gameState.questionStartTime;
+        let interval;
+
+        const checkTimeAndAdvance = () => {
+          const elapsed = Date.now() - startTimestamp;
+          const remaining =
+            QUESTION_DURATION_SECONDS - elapsed / 1000;
+          const currentTimerValue = Math.max(0, remaining);
+          setTimer(currentTimerValue);
+
+          if (currentTimerValue <= 0) {
+            clearInterval(interval);
+
+            if (gameState.currentQuestionIndex < TOTAL_QUESTIONS - 1) {
+              setTimeout(() => {
+                startNextQuestion();
+              }, 500);
+            } else if (
+              gameState.currentQuestionIndex ===
+              TOTAL_QUESTIONS - 1
+            ) {
+              setTimeout(() => {
+                startNextQuestion();
+              }, 500);
+            }
+          }
+        };
+
+        interval = setInterval(checkTimeAndAdvance, 100);
+        checkTimeAndAdvance();
+
+        return () => clearInterval(interval);
+      }, [gameState, startNextQuestion]);
+
+      // Game State listener
+      useEffect(() => {
+        if (!GAME_STATE_DOC_REF || !isAuthReady) return;
+        const unsubscribe = GAME_STATE_DOC_REF.onSnapshot(
+          (docSnap) => {
+            if (docSnap.exists) {
+              const state = docSnap.data();
+              setGameState(state);
+
+              if (
+                state.status === "lobby" ||
+                state.currentQuestionIndex === -1
+              ) {
+                setNewQuestionText(`Song 1 Diagnosis?`);
+              } else if (
+                state.currentQuestionIndex < TOTAL_QUESTIONS
+              ) {
+                setNewQuestionText(
+                  `Song ${state.currentQuestionIndex + 2} Diagnosis?`
+                );
+              }
+            } else {
+              console.error("Game state document not found.");
+            }
+          }
+        );
+        return () => unsubscribe();
+      }, [GAME_STATE_DOC_REF, isAuthReady]);
+
+      // Teams listener
+      useEffect(() => {
+        if (!TEAMS_COLLECTION_REF || !isAuthReady) return;
+        const unsubscribe = TEAMS_COLLECTION_REF.onSnapshot(
+          (snapshot) => {
+            setTeams(
+              snapshot.docs.map((doc) => ({
+                id: doc.id,
+                ...doc.data(),
+              }))
+            );
+          }
+        );
+        return () => unsubscribe();
+      }, [TEAMS_COLLECTION_REF, isAuthReady]);
+
+      // Submissions listener
+      useEffect(() => {
+        if (
+          !SUBMISSIONS_COLLECTION_REF ||
+          !gameState ||
+          gameState.currentQuestionIndex === -1 ||
+          !isAuthReady
+        )
+          return;
+
+        const q = SUBMISSIONS_COLLECTION_REF.where(
+          "questionIndex",
+          "==",
+          gameState.currentQuestionIndex
+        );
+
+        const unsubscribe = q.onSnapshot((snapshot) => {
+          setSubmissions(
+            snapshot.docs.map((doc) => ({
+              id: doc.id,
+              ...doc.data(),
+            }))
+          );
+        });
+        return () => unsubscribe();
+      }, [SUBMISSIONS_COLLECTION_REF, gameState, isAuthReady]);
+
+      const resetGame = useCallback(async () => {
+        if (
+          !GAME_STATE_DOC_REF ||
+          !SUBMISSIONS_COLLECTION_REF ||
+          !TEAMS_COLLECTION_REF ||
+          !db ||
+          !isAuthReady
+        )
+          return;
+
+        if (
+          !window.confirm(
+            "Are you sure you want to reset the entire game (including all teams and submissions)?"
+          )
+        )
+          return;
+
+        try {
+          await GAME_STATE_DOC_REF.set({
+            status: "lobby",
+            currentQuestionIndex: -1,
+            questionStartTime: 0,
+            currentQuestionText: "Awaiting Host Start",
+            lastUpdate:
+              firebase.firestore.FieldValue.serverTimestamp(),
+          });
+
+          const snapshotSubmissions =
+            await SUBMISSIONS_COLLECTION_REF.get();
+          const batchSubmissions = db.batch();
+          snapshotSubmissions.docs.forEach((doc) =>
+            batchSubmissions.delete(doc.ref)
+          );
+          await batchSubmissions.commit();
+
+          const snapshotTeams = await TEAMS_COLLECTION_REF.get();
+          const batchTeams = db.batch();
+          snapshotTeams.docs.forEach((doc) =>
+            batchTeams.delete(doc.ref)
+          );
+          await batchTeams.commit();
+
+          console.log("Game reset completed.");
+        } catch (e) {
+          console.error("Error resetting game:", e);
+        }
+      }, [
+        GAME_STATE_DOC_REF,
+        SUBMISSIONS_COLLECTION_REF,
+        TEAMS_COLLECTION_REF,
+        db,
+        isAuthReady,
+      ]);
+
+      const currentQuestionIndex =
+        gameState?.currentQuestionIndex || -1;
+      const isQuestionActive =
+        gameState?.status === "question" && timer > 0;
+      const isScreeningComplete =
+        gameState?.status === "results" &&
+        currentQuestionIndex === TOTAL_QUESTIONS;
+
+      const displayTimer = Math.floor(timer * 10) / 10;
+
+      const scoreBoard = useMemo(() => {
+        const scores = teams.map((t) => ({
+          id: t.id,
+          name: t.teamName,
+          submission: submissions.find(
+            (s) =>
+              s.teamId === t.id &&
+              s.questionIndex === currentQuestionIndex
+          ),
+        }));
+
+        return scores.sort((a, b) => {
+          const subA = a.submission;
+          const subB = b.submission;
+
+          if (subA && !subB) return -1;
+          if (!subA && subB) return 1;
+          if (!subA && !subB) return 0;
+          if (subA && subB) return subA.timeTakenMs - subB.timeTakenMs;
+
+          return a.name.localeCompare(b.name);
+        });
+      }, [teams, submissions, currentQuestionIndex]);
+
+      const questionHeader =
+        gameState?.currentQuestionText.split(":")[0] ||
+        "Screening Round";
+
+      if (!gameState) return <LoadingSpinner />;
+
+      const isHostStartButtonDisabled = gameState.status !== "lobby";
+      const nextButtonText =
+        gameState.status === "lobby"
+          ? "Start Screening Round"
+          : isScreeningComplete
+          ? "Screening Complete"
+          : `Quiz Running... Q${currentQuestionIndex + 1}/${
+              TOTAL_QUESTIONS
+            }`;
+
+      return (
+        <div className="min-h-screen bg-[#E0F2F1] text-[#263238] font-['Roboto'] relative overflow-hidden">
+          <div className="absolute top-0 left-0 right-0 h-24 bg-[#673AB7] text-white text-center text-4xl font-bold font-['Arial'] tracking-wider pt-6">
+            CEREBREXIA '25
+          </div>
+          <div className="absolute inset-0 bg-gradient-to-br from-[#E0F2F1] to-[#BBDEFB] opacity-80 z-0"></div>
+          <HeartBeatAnimation />
+          <div className="relative z-10 p-4 sm:p-8 pt-24">
+            <header className="flex justify-between items-center mb-6 pb-4 border-b-2 border-[#FF6B6B]">
+              <h1 className="text-3xl font-extrabold text-[#E91E63] flex items-center font-brand">
+                Host Control
+              </h1>
+              <div className="text-lg font-mono text-[#4CAF50] bg-white/70 px-4 py-2 rounded-lg shadow-md">
+                Teams:{" "}
+                <span className="text-[#E91E63] font-bold">
+                  {teams.length}
+                </span>
+              </div>
+            </header>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+              {/* Game Status & Controls */}
+              <div className="lg:col-span-1 p-6 bg-white/90 rounded-xl shadow-2xl h-fit sticky top-4 border-l-4 border-[#FFC107] backdrop-blur-sm">
+                <h2 className="text-2xl font-bold mb-4 pb-2 border-b border-[#FF6B6B] text-[#E91E63] font-brand">
+                  Game Status
+                </h2>
+
+                <div className="space-y-4 mb-6 text-[#263238]">
+                  <p className="text-xl">
+                    Status:{" "}
+                    <span
+                      className={`font-bold uppercase ${
+                        gameState.status === "lobby"
+                          ? "text-yellow-700"
+                          : gameState.status === "question"
+                          ? "text-[#4CAF50]"
+                          : "text-purple-700"
+                      }`}
+                    >
+                      {gameState.status}
+                    </span>
+                  </p>
+                  <p className="text-xl">
+                    Question:{" "}
+                    <span className="font-bold text-[#E91E63]">
+                      {currentQuestionIndex + 1} / {TOTAL_QUESTIONS}
+                    </span>
+                  </p>
+                  {(isQuestionActive || isScreeningComplete) && (
+                    <p className="text-lg">
+                      Current Question:{" "}
+                      <span className="font-semibold text-[#263238]">
+                        {gameState.currentQuestionText}
+                      </span>
+                    </p>
+                  )}
+                </div>
+
+                <div className="text-center bg-[#BBDEFB]/50 p-4 rounded-lg mb-6 border border-[#2196F3]">
+                  <p
+                    className="text-5xl font-mono font-extrabold"
+                    style={{
+                      color:
+                        timer <= 10 &&
+                        gameState.status === "question"
+                          ? "#E91E63"
+                          : "#4CAF50",
+                    }}
+                  >
+                    {displayTimer.toFixed(1)}
+                  </p>
+                  <p className="text-base text-[#4CAF50] font-semibold">
+                    Remaining Time
+                  </p>
+                </div>
+
+                {gameState?.status === "lobby" && (
+                  <div className="mb-6 space-y-3">
+                    <h3 className="text-lg font-bold text-[#673AB7]">
+                      Set First Question Text
+                    </h3>
+                    <input
+                      type="text"
+                      placeholder="e.g., Song 1 Diagnosis?"
+                      value={newQuestionText}
+                      onChange={(e) =>
+                        setNewQuestionText(e.target.value)
+                      }
+                      className="w-full p-2 rounded-md bg-[#ECEFF1] border border-[#B0BEC5] text-[#263238] placeholder-[#90A4AE]"
+                    />
+                  </div>
+                )}
+
+                <div className="flex flex-col space-y-3">
+                  <button
+                    onClick={startNextQuestion}
+                    disabled={isHostStartButtonDisabled}
+                    className={`w-full py-3 rounded-lg text-lg font-bold transition-all duration-200 ${
+                      isHostStartButtonDisabled
+                        ? "bg-[#B0BEC5] text-[#455A64] cursor-not-allowed"
+                        : "bg-[#4CAF50] hover:bg-[#388E3C] active:bg-[#2E7D32] text-white shadow-md hover:shadow-[#4CAF50]/50"
+                    }`}
+                  >
+                    {nextButtonText}
+                  </button>
+
+                  <button
+                    onClick={resetGame}
+                    className="w-full py-2 bg-[#F44336] hover:bg-[#D32F2F] active:bg-[#C62828] text-white rounded-lg text-sm font-semibold transition-all duration-200 shadow-md"
+                  >
+                    Reset All Data
+                  </button>
+                </div>
+              </div>
+
+              {/* Real-time Scoreboard */}
+              <div className="lg:col-span-2 p-6 bg-white/90 rounded-xl shadow-2xl border-r-4 border-[#2196F3] backdrop-blur-sm">
+                <h2 className="2xl font-bold mb-4 pb-2 border-b border-[#FF6B6B] text-[#E91E63] font-brand">
+                  Live Submissions for Q{currentQuestionIndex + 1}
+                </h2>
+                <p className="text-sm text-gray-500 mb-4">
+                  Host must manually check the diagnoses for correctness
+                  later.
+                </p>
+                <div className="overflow-x-auto table-responsive">
+                  <table className="min-w-full divide-y divide-[#BDBDBD]">
+                    <thead className="bg-[#CFD8DC]">
+                      <tr>
+                        <th className="px-3 py-3 text-left text-xs font-medium text-[#455A64] uppercase tracking-wider rounded-tl-lg">
+                          Team Name
+                        </th>
+                        <th className="px-3 py-3 text-center text-xs font-medium text-[#455A64] uppercase tracking-wider">
+                          Status
+                        </th>
+                        <th className="px-3 py-3 text-center text-xs font-medium text-[#455A64] uppercase tracking-wider">
+                          Time Taken
+                        </th>
+                        <th className="px-3 py-3 text-left text-xs font-medium text-[#455A64] uppercase tracking-wider rounded-tr-lg">
+                          Diagnosis
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#E0E0E0]">
+                      {scoreBoard.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={4}
+                            className="text-center py-4 text-[#757575]"
+                          >
+                            No teams connected yet or no submissions
+                            for current question.
+                          </td>
+                        </tr>
+                      ) : (
+                        scoreBoard.map((team) => {
+                          const sub = team.submission;
+
+                          const bgColor = sub
+                            ? "bg-[#B2EBF2]"
+                            : "bg-gray-100";
+                          const textColor = sub
+                            ? "text-[#00BCD4]"
+                            : "text-[#9E9E9E]";
+
+                          return (
+                            <tr
+                              key={team.id}
+                              className="hover:bg-[#ECEFF1]"
+                            >
+                              <td className="px-3 py-3 whitespace-nowrap text-[#4CAF50] font-semibold">
+                                {team.name}
+                              </td>
+                              <td className="px-3 py-3 text-center">
+                                <div
+                                  className={`${bgColor} rounded-md p-1 font-mono transition-all duration-300`}
+                                >
+                                  <span
+                                    className={`block text-xl ${textColor}`}
+                                  >
+                                    {sub ? "Submitted" : "Waiting"}
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="px-3 py-3 text-center text-sm font-mono text-[#607D8B]">
+                                {sub
+                                  ? formatTime(sub.timeTakenMs)
+                                  : "--"}
+                              </td>
+                              <td className="px-3 py-3 text-[#263238] font-medium">
+                                {sub ? sub.answer : "--"}
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // --- TEAM SCREEN ---
+
+    const TeamScreen = ({
+      userId,
+      db,
+      isAuthReady,
+      GAME_STATE_DOC_REF,
+      TEAMS_COLLECTION_REF,
+      SUBMISSIONS_COLLECTION_REF,
+    }) => {
+      const [teamName, setTeamName] = useState("");
+      const [isJoined, setIsJoined] = useState(false);
+      const [gameState, setGameState] = useState(null);
+      const [answer, setAnswer] = useState("");
+      const [submissionStatus, setSubmissionStatus] = useState(null);
+      const [timer, setTimer] = useState(QUESTION_DURATION_SECONDS);
+
+      // Submission status watcher
+      useEffect(() => {
+        if (
+          !SUBMISSIONS_COLLECTION_REF ||
+          !gameState ||
+          gameState.currentQuestionIndex === -1 ||
+          !isAuthReady
+        ) {
+          setSubmissionStatus(null);
+          return;
+        }
+
+        const q = SUBMISSIONS_COLLECTION_REF.where(
+          "teamId",
+          "==",
+          userId
+        ).where("questionIndex", "==", gameState.currentQuestionIndex);
+
+        const checkSubmission = async () => {
+          if (!db) return;
+          try {
+            const snapshot = await q.get();
+            if (!snapshot.empty) {
+              setSubmissionStatus("submitted");
+            } else if (gameState.status === "question") {
+              setSubmissionStatus(null);
+            }
+          } catch (e) {
+            console.error("Error checking submission status:", e);
+          }
+        };
+
+        const unsubscribe = q.onSnapshot((snapshot) => {
+          if (!snapshot.empty) {
+            setSubmissionStatus("submitted");
+          } else if (gameState?.status === "question") {
+            setSubmissionStatus(null);
+          }
+        });
+
+        checkSubmission();
+        return () => unsubscribe();
+      }, [
+        SUBMISSIONS_COLLECTION_REF,
+        gameState,
+        userId,
+        db,
+        isAuthReady,
+      ]);
+
+      // Game State listener
+      useEffect(() => {
+        if (!GAME_STATE_DOC_REF || !isAuthReady) return;
+        const unsubscribe = GAME_STATE_DOC_REF.onSnapshot(
+          (docSnap) => {
+            if (docSnap.exists) {
+              const newState = docSnap.data();
+
+              if (
+                newState.currentQuestionIndex !==
+                gameState?.currentQuestionIndex
+              ) {
+                setSubmissionStatus(null);
+                setAnswer("");
+                setTimer(QUESTION_DURATION_SECONDS);
+              }
+
+              setGameState(newState);
+            }
+          }
+        );
+        return () => unsubscribe();
+      }, [GAME_STATE_DOC_REF, gameState?.currentQuestionIndex, isAuthReady]);
+
+      // Timer
+      useEffect(() => {
+        if (
+          !gameState ||
+          gameState.status !== "question" ||
+          !gameState.questionStartTime
+        ) {
+          setTimer(QUESTION_DURATION_SECONDS);
+          return;
+        }
+
+        const startTimestamp = gameState.questionStartTime.toMillis
+          ? gameState.questionStartTime.toMillis()
+          : gameState.questionStartTime;
+        const interval = setInterval(() => {
+          const elapsed = Date.now() - startTimestamp;
+          const remaining =
+            QUESTION_DURATION_SECONDS - elapsed / 1000;
+          setTimer(Math.max(0, remaining));
+
+          if (remaining <= 0) {
+            clearInterval(interval);
+            if (submissionStatus !== "submitted") {
+              setSubmissionStatus("timeout");
+            }
+          }
+        }, 100);
+
+        return () => clearInterval(interval);
+      }, [gameState, submissionStatus]);
+
+      const handleJoin = useCallback(async () => {
+        if (
+          !teamName.trim() ||
+          !TEAMS_COLLECTION_REF ||
+          !userId ||
+          !isAuthReady
+        )
+          return;
+
+        try {
+          const teamDocRef = TEAMS_COLLECTION_REF.doc(userId);
+          await teamDocRef.set(
+            {
+              teamName: teamName.trim(),
+              status: "connected",
+              joinedAt:
+                firebase.firestore.FieldValue.serverTimestamp(),
+              userId: userId,
+            },
+            { merge: true }
+          );
+
+          setIsJoined(true);
+          console.log("Team joined:", teamName);
+        } catch (e) {
+          console.error("Error joining team:", e);
+        }
+      }, [teamName, TEAMS_COLLECTION_REF, userId, isAuthReady]);
+
+      const handleSubmit = useCallback(async () => {
+        if (
+          !answer.trim() ||
+          submissionStatus === "submitted" ||
+          submissionStatus === "timeout" ||
+          !SUBMISSIONS_COLLECTION_REF ||
+          !gameState ||
+          !teamName ||
+          !userId ||
+          !db ||
+          !isAuthReady
+        ) {
+          return;
+        }
+
+        if (gameState.status !== "question") {
+          window.confirm("Cannot submit: Quiz is not currently active.");
+          return;
+        }
+
+        setSubmissionStatus("submitted");
+
+        const questionStartTime = gameState.questionStartTime.toMillis
+          ? gameState.questionStartTime.toMillis()
+          : gameState.questionStartTime;
+        const submissionTime = Date.now();
+        const timeTakenMs = submissionTime - questionStartTime;
+
+        if (timeTakenMs < 0) {
+          console.error(
+            "Calculated time taken is negative, aborting submission."
+          );
+          setSubmissionStatus(null);
+          return;
+        }
+
+        try {
+          await db.runTransaction(async (transaction) => {
+            const q = SUBMISSIONS_COLLECTION_REF.where(
+              "teamId",
+              "==",
+              userId
+            ).where(
+              "questionIndex",
+              "==",
+              gameState.currentQuestionIndex
+            );
+
+            const snapshot = await transaction.get(q);
+
+            if (snapshot.empty) {
+              const newDocRef = SUBMISSIONS_COLLECTION_REF.doc();
+              transaction.set(newDocRef, {
+                teamId: userId,
+                teamName: teamName,
+                questionIndex: gameState.currentQuestionIndex,
+                answer: answer.trim(),
+                timeTakenMs: timeTakenMs,
+                timestamp:
+                  firebase.firestore.FieldValue.serverTimestamp(),
+              });
+            } else {
+              console.warn(
+                "Submission already exists for this question."
+              );
+            }
+          });
+        } catch (e) {
+          console.error("Error submitting answer:", e);
+          setSubmissionStatus(null);
+        }
+      }, [
+        answer,
+        submissionStatus,
+        SUBMISSIONS_COLLECTION_REF,
+        gameState,
+        teamName,
+        userId,
+        db,
+        isAuthReady,
+      ]);
+
+      const displayTimer = Math.floor(timer * 10) / 10;
+      const isInputLocked =
+        submissionStatus === "submitted" ||
+        submissionStatus === "timeout";
+      const isScreeningComplete =
+        gameState?.status === "results" &&
+        gameState.currentQuestionIndex === TOTAL_QUESTIONS;
+
+      const isNextButtonDisabled =
+        gameState?.status !== "question" || timer > 0;
+
+      const isSubmitButtonDisabled =
+        isInputLocked ||
+        gameState?.status !== "question" ||
+        answer.trim().length < 2 ||
+        timer <= 0;
+
+      const submitButtonText =
+        submissionStatus === "submitted"
+          ? "Diagnosis Submitted"
+          : submissionStatus === "timeout"
+          ? "Time Expired (Wait for Advance)"
+          : "Submit Diagnosis";
+
+      const questionParts = gameState?.currentQuestionText
+        ? gameState.currentQuestionText.split(":")
+        : [];
+      const questionHeader =
+        questionParts[0]?.trim() || "Question Loading...";
+      const questionDetails = questionParts.slice(1).join(":").trim();
+
+      if (!gameState) return <LoadingSpinner />;
+
+      // Lobby / Join view
+      if (!isJoined) {
+        return (
+          <div className="min-h-screen bg-[#E0F2F1] flex items-center justify-center p-4 font-['Roboto'] relative overflow-hidden">
+            <HeartBeatAnimation />
+            <div className="bg-white/90 p-8 rounded-xl shadow-2xl max-w-lg w-full text-[#263238] border-t-4 border-[#4CAF50] backdrop-blur-sm relative z-10">
+              <MedMelodyLogo />
+              <h1 className="3xl font-extrabold text-[#E91E63] mb-4 text-center font-brand">
+                Join Screening Round
+              </h1>
+              <p className="text-[#455A64] mb-6 text-center">
+                Enter your unique team name to join the competition.
+              </p>
+
+              <input
+                type="text"
+                placeholder="Team Name (e.g., The Diagnosers)"
+                value={teamName}
+                onChange={(e) => setTeamName(e.target.value)}
+                className="w-full p-3 mb-4 rounded-lg bg-[#ECEFF1] text-[#263238] placeholder-[#90A4AE] border border-[#B0BEC5] focus:ring-[#4CAF50] focus:border-[#4CAF50]"
+              />
+              <button
+                onClick={handleJoin}
+                disabled={teamName.trim().length < 3}
+                className={`w-full py-3 rounded-lg text-lg font-bold transition-all duration-200 ${
+                  teamName.trim().length >= 3
+                    ? "bg-[#4CAF50] hover:bg-[#388E3C] active:bg-[#2E7D32] text-white shadow-md hover:shadow-[#4CAF50]/50"
+                    : "bg-[#B0BEC5] text-[#455A64] cursor-not-allowed"
+                }`}
+              >
+                Join Lobby
+              </button>
+              <p className="mt-4 text-xs text-[#9E9E9E] text-center">
+                Your ID: {userId}
+              </p>
+            </div>
+          </div>
+        );
+      }
+
+      // Waiting / Results
+      if (gameState.status === "lobby" || isScreeningComplete) {
+        return (
+          <div className="min-h-screen bg-[#E0F2F1] flex items-center justify-center p-4 font-['Roboto'] relative overflow-hidden">
+            <HeartBeatAnimation />
+            <div className="text-center relative z-10">
+              <MedMelodyLogo />
+              {gameState.status === "lobby" && (
+                <>
+                  <MessageBox
+                    title={`Welcome, ${teamName}!`}
+                    message="The Host is setting up the screening round. Please wait for the first song's diagnosis question to begin."
+                    icon={
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        className="h-8 w-8 text-[#FFC107]"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                      >
+                        <circle cx="12" cy="12" r="10" />
+                        <path d="M12 8v4m0 4h.01" />
+                      </svg>
+                    }
+                  />
+                  <p className="mt-6 text-xl text-[#607D8B] animate-pulse">
+                    Waiting for Host to Start Quiz...
+                  </p>
+                </>
+              )}
+              {isScreeningComplete && (
+                <MessageBox
+                  title={`Screening Complete!`}
+                  message="All questions answered. Results are being calculated. Check the Host screen for final rankings!"
+                  icon={
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      className="h-8 w-8 text-[#673AB7]"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
+                      <path d="M9 11l3 3L22 4" />
+                      <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+                    </svg>
+                  }
+                />
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      // Question active view
+      const timerStyle =
+        timer <= 10 ? "text-[#E91E63] animate-pulse" : "text-[#4CAF50]";
+
+      return (
+        <div className="min-h-screen bg-[#E0F2F1] p-4 sm:p-8 flex flex-col items-center font-['Roboto'] relative overflow-hidden">
+          <HeartBeatAnimation />
+          <header className="w-full max-w-4xl text-center mb-6 relative z-10">
+            <p className="text-xl font-semibold text-[#607D8B] mb-2">
+              Team: <span className="text-[#E91E63]">{teamName}</span>
+            </p>
+            <h1 className="4xl sm:text-5xl font-extrabold text-[#4CAF50] font-brand">
+              {questionHeader}
+            </h1>
+            {questionDetails && (
+              <p className="text-xl mt-2 text-[#263238] font-bold">
+                {questionDetails}
+              </p>
+            )}
+          </header>
+
+          <main className="w-full max-w-4xl bg-white/90 p-6 sm:p-8 rounded-xl shadow-2xl border-t-4 border-[#2196F3] backdrop-blur-sm relative z-10">
+            <div className="text-center mb-8 bg-[#E1F5FE] p-4 rounded-lg border border-[#BBDEFB]">
+              <p className="text-lg text-[#607D8B] font-mono uppercase">
+                Time Remaining (Q{gameState.currentQuestionIndex + 1}/
+                {TOTAL_QUESTIONS})
+              </p>
+              <p
+                className={`text-7xl font-mono font-extrabold transition-colors duration-500 ${timerStyle}`}
+              >
+                {displayTimer.toFixed(1)}
+              </p>
+            </div>
+
+            <textarea
+              placeholder={
+                isInputLocked
+                  ? submissionStatus === "submitted"
+                    ? "Waiting for the automatic advance to the next song."
+                    : "Time is up! Wait for the next question."
+                  : "Type your diagnosis here..."
+              }
+              value={answer}
+              onChange={(e) => setAnswer(e.target.value)}
+              disabled={isInputLocked || timer <= 0}
+              rows="4"
+              className={`w-full p-4 mb-6 rounded-lg text-lg bg-[#ECEFF1] text-[#263238] placeholder-[#90A4AE] border-2 transition-all duration-300 shadow-inner ${
+                isInputLocked || timer <= 0
+                  ? "opacity-70 cursor-not-allowed border-[#B0BEC5]"
+                  : "border-[#4CAF50] focus:ring-[#4CAF50] focus:border-[#4CAF50]"
+              }`}
+            />
+
+            <div className="flex gap-4">
+              <button
+                onClick={handleSubmit}
+                disabled={isSubmitButtonDisabled}
+                className={`w-1/2 py-4 rounded-lg text-xl font-bold transition-all duration-200 shadow-lg ${
+                  isSubmitButtonDisabled
+                    ? "bg-[#B0BEC5] text-[#455A64] cursor-not-allowed opacity-80"
+                    : "bg-[#FF6B6B] hover:bg-[#E53935] active:bg-[#C62828] text-white hover:shadow-[#FF6B6B]/60"
+                }`}
+              >
+                {submitButtonText}
+              </button>
+
+              <button
+                onClick={() => {
+                  if (!isNextButtonDisabled) {
+                    setSubmissionStatus(null);
+                    setAnswer("");
+                  }
+                }}
+                disabled={isNextButtonDisabled}
+                className={`w-1/2 py-4 rounded-lg text-xl font-bold transition-all duration-200 shadow-lg ${
+                  isNextButtonDisabled
+                    ? "bg-[#B0BEC5] text-[#455A64] cursor-not-allowed opacity-80"
+                    : "bg-[#673AB7] hover:bg-[#5E35B1] active:bg-[#4527A0] text-white hover:shadow-[#673AB7]/60"
+                }`}
+              >
+                Next Question
+              </button>
+            </div>
+
+            {submissionStatus === "submitted" && (
+              <p className="mt-4 text-center text-[#4CAF50] font-semibold">
+                Response recorded! Waiting for the automatic advance to
+                the next song.
+              </p>
+            )}
+            {submissionStatus === "timeout" && (
+              <p className="mt-4 text-center text-[#E91E63] font-semibold">
+                Time expired! The quiz will automatically advance soon.
+              </p>
+            )}
+          </main>
+        </div>
+      );
+    };
+
+    // --- MAIN APP COMPONENT ---
+
+    const App = () => {
+      const [authCode, setAuthCode] = useState("");
+      const [role, setRole] = useState(null);
+      const [error, setError] = useState(null);
+
+      const {
+        db,
+        auth,
+        userId,
+        isAuthReady,
+        GAME_STATE_DOC_REF,
+        TEAMS_COLLECTION_REF,
+        SUBMISSIONS_COLLECTION_REF,
+      } = useFirebaseInitialization();
+
+      const handleAuth = () => {
+        setError(null);
+        if (authCode === HOST_AUTH_CODE) {
+          setRole("host");
+        } else if (authCode === TEAM_AUTH_CODE) {
+          setRole("team");
+        } else {
+          setError("Invalid Auth Code. Please check the code and try again.");
+        }
+      };
+
+      if (!isAuthReady || !db) return <LoadingSpinner />;
+
+      if (!role) {
+        return (
+          <div className="min-h-screen bg-[#E0F2F1] flex items-center justify-center p-4 font-['Roboto'] relative overflow-hidden">
+            <HeartBeatAnimation />
+            <div className="bg-white/90 p-8 rounded-xl shadow-2xl max-w-sm w-full text-[#263238] border-t-4 border-[#673AB7] backdrop-blur-sm relative z-10">
+              <MedMelodyLogo />
+              <h1 className="text-3xl font-extrabold text-[#673AB7] mb-4 text-center font-brand">
+                Med Melody Access
+              </h1>
+              <p className="text-[#455A64] mb-6 text-center">
+                Enter your access code (Host or Team).
+              </p>
+
+              <input
+                type="text"
+                placeholder="Enter Auth Code"
+                value={authCode}
+                onChange={(e) => setAuthCode(e.target.value)}
+                className="w-full p-3 mb-4 rounded-lg bg-[#ECEFF1] text-[#263238] placeholder-[#90A4AE] border border-[#B0BEC5] focus:ring-[#673AB7] focus:border-[#673AB7]"
+              />
+              <button
+                onClick={handleAuth}
+                disabled={authCode.length < 5}
+                className={`w-full py-3 rounded-lg text-lg font-bold transition-all duration-200 shadow-md ${
+                  authCode.length >= 5
+                    ? "bg-[#673AB7] hover:bg-[#5E35B1] active:bg-[#4527A0] text-white hover:shadow-[#673AB7]/50"
+                    : "bg-[#B0BEC5] text-[#455A64] cursor-not-allowed"
+                }`}
+              >
+                Enter
+              </button>
+              {error && (
+                <p className="mt-4 text-[#E91E63] text-center text-sm font-semibold">
+                  {error}
+                </p>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      if (role === "host") {
+        return (
+          <HostScreen
+            userId={userId}
+            db={db}
+            isAuthReady={isAuthReady}
+            GAME_STATE_DOC_REF={GAME_STATE_DOC_REF}
+            TEAMS_COLLECTION_REF={TEAMS_COLLECTION_REF}
+            SUBMISSIONS_COLLECTION_REF={SUBMISSIONS_COLLECTION_REF}
+          />
+        );
+      }
+
+      if (role === "team") {
+        return (
+          <TeamScreen
+            userId={userId}
+            db={db}
+            isAuthReady={isAuthReady}
+            GAME_STATE_DOC_REF={GAME_STATE_DOC_REF}
+            TEAMS_COLLECTION_REF={TEAMS_COLLECTION_REF}
+            SUBMISSIONS_COLLECTION_REF={SUBMISSIONS_COLLECTION_REF}
+          />
+        );
+      }
+
+      return <LoadingSpinner />;
+    };
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
