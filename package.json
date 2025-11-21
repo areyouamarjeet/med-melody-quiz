@@ -2,7 +2,7 @@
   "name": "med-melody-quiz-app",
   "version": "1.0.0",
   "description": "Real-time multiplayer quiz application for Cerebrexia '25 using React and Firebase.",
-  "main": "index.jsx",
+  "main": "app.jsx",
   "scripts": {
     "dev": "echo 'Run locally with a React environment'",
     "build": "echo 'No complex build needed for single-file deployment'",
