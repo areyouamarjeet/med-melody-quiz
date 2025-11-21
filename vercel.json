@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "index.jsx",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "package.json",
+      "use": "@vercel/static-build",
+      "config": { "includeFiles": ["index.jsx"] }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/.*",
+      "dest": "index.jsx"
+    }
+  ]
+}
