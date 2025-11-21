@@ -62,31 +62,45 @@
             messagingSenderId: "348160751988"
         };
         
-        // --- FIREBASE INITIALIZATION & ACCESSOR HOOKS (Adapted for UMD/Global Access) ---
+        // --- FIREBASE INITIALIZATION & ACCESSOR HOOKS (V8 COMPATIBILITY) ---
 
-        let db, auth;
+        // These variables will hold the live Firebase service instances
+        let globalDb = null;
+        let globalAuth = null;
+        
         const APP_ID = 'cerebrexia-quiz-live';
 
         const generateSimpleUID = () => Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+        
+        // Path helpers (relies on the instance being passed)
+        const getPaths = (dbInstance) => {
+            if (!dbInstance) return {};
+            const PUBLIC_PATH = `artifacts/${APP_ID}/public/data`;
+            return {
+                GAME_STATE_DOC_REF: dbInstance.doc(`${PUBLIC_PATH}/game-state/master`),
+                TEAMS_COLLECTION_REF: dbInstance.collection(`${PUBLIC_PATH}/teams`),
+                SUBMISSIONS_COLLECTION_REF: dbInstance.collection(`${PUBLIC_PATH}/submissions`)
+            };
+        };
 
         function useFirebaseInitialization() {
+            const [services, setServices] = useState({ db: null, auth: null });
             const [userId, setUserId] = useState(null);
             const [isAuthReady, setIsAuthReady] = useState(false);
-            const PUBLIC_PATH = `artifacts/${APP_ID}/public/data`;
             
             useEffect(() => {
-                if (window.firebase && !db) {
+                if (window.firebase && !globalDb) {
                     try {
-                        // Firebase App Initialization
                         const app = window.firebase.initializeApp(FIREBASE_CONFIG);
-                        auth = app.auth(); 
-                        db = app.firestore(); 
-                        // Set recommended setting for compatibility
-                        db.settings({ timestampsInSnapshots: true });
+                        globalAuth = app.auth(); 
+                        globalDb = app.firestore(); 
+                        globalDb.settings({ timestampsInSnapshots: true });
 
-                        const docRef = db.doc(`${PUBLIC_PATH}/game-state/master`);
+                        setServices({ db: globalDb, auth: globalAuth });
+
+                        const docRef = globalDb.doc(`artifacts/${APP_ID}/public/data/game-state/master`);
                         
-                        const unsubscribe = auth.onAuthStateChanged(async (user) => {
+                        const unsubscribeAuth = globalAuth.onAuthStateChanged(async (user) => {
                             if (user) {
                                 setUserId(user.uid);
                                 setIsAuthReady(true);
@@ -94,7 +108,7 @@
                                 
                                 // Check and initialize game state
                                 const checkAndInitGameState = async () => {
-                                    if (!db) return; 
+                                    if (!globalDb) return; // Re-check inside async function
                                     try {
                                         const docSnap = await docRef.get();
                                         if (!docSnap.exists) {
@@ -113,9 +127,8 @@
                                 checkAndInitGameState();
 
                             } else {
-                                // Attempt Anonymous Sign-in
                                 try {
-                                    await auth.signInAnonymously();
+                                    await globalAuth.signInAnonymously();
                                 } catch (error) {
                                     console.error("Authentication failed:", error);
                                     setUserId(generateSimpleUID());
@@ -124,7 +137,7 @@
                             }
                         });
                         
-                        return () => unsubscribe();
+                        return () => unsubscribeAuth();
                     } catch (e) {
                         console.error("Firebase Initialization Error:", e);
                     }
@@ -132,13 +145,11 @@
             }, []);
 
             return { 
-                db, 
-                auth, 
+                db: services.db, 
+                auth: services.auth, 
                 userId, 
                 isAuthReady, 
-                GAME_STATE_DOC_REF: db ? db.doc(`${PUBLIC_PATH}/game-state/master`) : null, 
-                TEAMS_COLLECTION_REF: db ? db.collection(`${PUBLIC_PATH}/teams`) : null, 
-                SUBMISSIONS_COLLECTION_REF: db ? db.collection(`${PUBLIC_PATH}/submissions`) : null 
+                ...getPaths(services.db)
             };
         }
 
@@ -192,19 +203,17 @@
 
         // --- HOST SCREEN ---
 
-        const HostScreen = ({ userId, db, GAME_STATE_DOC_REF, TEAMS_COLLECTION_REF, SUBMISSIONS_COLLECTION_REF }) => {
+        const HostScreen = ({ userId, db, isAuthReady, GAME_STATE_DOC_REF, TEAMS_COLLECTION_REF, SUBMISSIONS_COLLECTION_REF }) => {
             const [gameState, setGameState] = useState(null);
             const [teams, setTeams] = useState([]);
             const [submissions, setSubmissions] = useState([]);
             const [timer, setTimer] = useState(QUESTION_DURATION_SECONDS);
             
-            // Host now only inputs the question text
             const [newQuestionText, setNewQuestionText] = useState('');
-            // Removed newCorrectAnswer state
-
+            
             // Real-time listener for Game State
             useEffect(() => {
-                if (!GAME_STATE_DOC_REF) return;
+                if (!GAME_STATE_DOC_REF || !isAuthReady) return; // Guard against not ready
                 const unsubscribe = GAME_STATE_DOC_REF.onSnapshot((docSnap) => {
                     if (docSnap.exists) {
                         const state = docSnap.data();
@@ -221,31 +230,30 @@
                     }
                 });
                 return () => unsubscribe();
-            }, [GAME_STATE_DOC_REF]);
+            }, [GAME_STATE_DOC_REF, isAuthReady]); // Depend on GAME_STATE_DOC_REF and isAuthReady
 
             // Real-time listener for Teams
             useEffect(() => {
-                if (!TEAMS_COLLECTION_REF) return;
+                if (!TEAMS_COLLECTION_REF || !isAuthReady) return; // Guard against not ready
                 const unsubscribe = TEAMS_COLLECTION_REF.onSnapshot((snapshot) => {
                     setTeams(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
                 });
                 return () => unsubscribe();
-            }, [TEAMS_COLLECTION_REF]);
+            }, [TEAMS_COLLECTION_REF, isAuthReady]); // Depend on TEAMS_COLLECTION_REF and isAuthReady
 
             // Real-time listener for Submissions for the current question
             useEffect(() => {
-                if (!SUBMISSIONS_COLLECTION_REF || !gameState || gameState.currentQuestionIndex === -1) return;
+                if (!SUBMISSIONS_COLLECTION_REF || !gameState || gameState.currentQuestionIndex === -1 || !isAuthReady) return; // Guard against not ready
                 
-                // Query without orderBy to avoid index requirement
                 const q = SUBMISSIONS_COLLECTION_REF.where('questionIndex', '==', gameState.currentQuestionIndex);
                 
                 const unsubscribe = q.onSnapshot((snapshot) => {
                     setSubmissions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
                 });
                 return () => unsubscribe();
-            }, [SUBMISSIONS_COLLECTION_REF, gameState]);
+            }, [SUBMISSIONS_COLLECTION_REF, gameState, isAuthReady]); // Depend on SUBMISSIONS_COLLECTION_REF, gameState, and isAuthReady
 
-            // Timer logic
+            // Timer logic (uses local state, not Firebase objects)
             useEffect(() => {
                 if (!gameState || gameState.status !== 'question' || !gameState.questionStartTime) {
                     setTimer(QUESTION_DURATION_SECONDS);
@@ -267,7 +275,7 @@
             }, [gameState]);
 
             const startNextQuestion = useCallback(async () => {
-                if (!GAME_STATE_DOC_REF || !db) return;
+                if (!GAME_STATE_DOC_REF || !db || !isAuthReady) return;
 
                 const nextIndex = (gameState?.currentQuestionIndex || -1) + 1;
 
@@ -307,10 +315,10 @@
                 } catch (e) {
                     console.error("Error starting question:", e);
                 }
-            }, [GAME_STATE_DOC_REF, gameState, newQuestionText, db]);
+            }, [GAME_STATE_DOC_REF, gameState, newQuestionText, db, isAuthReady]);
 
             const resetGame = useCallback(async () => {
-                if (!GAME_STATE_DOC_REF || !SUBMISSIONS_COLLECTION_REF || !TEAMS_COLLECTION_REF || !db) return;
+                if (!GAME_STATE_DOC_REF || !SUBMISSIONS_COLLECTION_REF || !TEAMS_COLLECTION_REF || !db || !isAuthReady) return;
 
                 if (!window.confirm("Are you sure you want to reset the entire game (including all teams and submissions)?")) return;
 
@@ -326,7 +334,7 @@
 
                     // 2. Clear all submissions 
                     const qSubmissions = SUBMISSIONS_COLLECTION_REF;
-                    const snapshotSubmissions = await qSubmissions.get();
+                    const snapshotSubmissions = await qSubmissions.get(); 
                     const batchSubmissions = db.batch();
                     snapshotSubmissions.docs.forEach((doc) => batchSubmissions.delete(doc.ref));
                     await batchSubmissions.commit();
@@ -342,7 +350,7 @@
                 } catch (e) {
                     console.error("Error resetting game:", e);
                 }
-            }, [GAME_STATE_DOC_REF, SUBMISSIONS_COLLECTION_REF, TEAMS_COLLECTION_REF, db]);
+            }, [GAME_STATE_DOC_REF, SUBMISSIONS_COLLECTION_REF, TEAMS_COLLECTION_REF, db, isAuthReady]);
 
             const currentQuestionIndex = gameState?.currentQuestionIndex || -1;
             const isQuestionActive = gameState?.status === 'question' && timer > 0;
@@ -358,6 +366,7 @@
                     submission: submissions.find(s => s.teamId === t.id && s.questionIndex === currentQuestionIndex),
                 }));
                 
+                // Sort by submission time (fastest first)
                 return scores.sort((a, b) => {
                     const subA = a.submission;
                     const subB = b.submission;
@@ -365,6 +374,7 @@
                     if (subA && !subB) return -1; 
                     if (!subA && subB) return 1;  
                     if (!subA && !subB) return 0; 
+                    if (subA.timeTakenMs === subB.timeTakenMs) return 0;
 
                     return subA.timeTakenMs - subB.timeTakenMs;
                 });
@@ -533,7 +543,7 @@
 
         // --- TEAM SCREEN ---
 
-        const TeamScreen = ({ userId, db, GAME_STATE_DOC_REF, TEAMS_COLLECTION_REF, SUBMISSIONS_COLLECTION_REF }) => {
+        const TeamScreen = ({ userId, db, isAuthReady, GAME_STATE_DOC_REF, TEAMS_COLLECTION_REF, SUBMISSIONS_COLLECTION_REF }) => {
             const [teamName, setTeamName] = useState('');
             const [isJoined, setIsJoined] = useState(false);
             const [gameState, setGameState] = useState(null);
@@ -543,11 +553,12 @@
 
             // Fetch submission status for the current question
             useEffect(() => {
-                if (!SUBMISSIONS_COLLECTION_REF || !gameState || gameState.currentQuestionIndex === -1) {
+                if (!SUBMISSIONS_COLLECTION_REF || !gameState || gameState.currentQuestionIndex === -1 || !isAuthReady) {
                     setSubmissionStatus(null);
                     return;
                 }
                 
+                // V8 Query syntax: where() returns a query, get() fetches data
                 const q = SUBMISSIONS_COLLECTION_REF
                     .where('teamId', '==', userId)
                     .where('questionIndex', '==', gameState.currentQuestionIndex);
@@ -556,7 +567,7 @@
                 const checkSubmission = async () => {
                     if (!db) return; 
                     try {
-                        const snapshot = await q.get();
+                        const snapshot = await q.get(); // V8 API
                         if (!snapshot.empty) {
                             setSubmissionStatus('submitted');
                         } else {
@@ -568,7 +579,7 @@
                 };
                 
                 // Use a listener to detect submission changes instantly
-                const unsubscribe = q.onSnapshot(snapshot => {
+                const unsubscribe = q.onSnapshot(snapshot => { // V8 API
                     if (!snapshot.empty) {
                         setSubmissionStatus('submitted');
                     } else if (gameState?.status === 'question') {
@@ -576,22 +587,19 @@
                     }
                 });
 
-                // Run an initial check and subscribe to changes
                 checkSubmission();
                 return () => unsubscribe();
 
-            }, [SUBMISSIONS_COLLECTION_REF, gameState, userId, db]); // FIX: Added db dependency
+            }, [SUBMISSIONS_COLLECTION_REF, gameState, userId, db, isAuthReady]); 
 
             // Real-time listener for Game State
             useEffect(() => {
-                if (!GAME_STATE_DOC_REF) return;
-                const unsubscribe = GAME_STATE_DOC_REF.onSnapshot((docSnap) => {
+                if (!GAME_STATE_DOC_REF || !isAuthReady) return; // Guard against not ready
+                const unsubscribe = GAME_STATE_DOC_REF.onSnapshot((docSnap) => { // V8 API
                     if (docSnap.exists) {
                         const newState = docSnap.data();
                         
-                        // Check if the question index changed (i.e., host advanced)
                         if (newState.currentQuestionIndex !== gameState?.currentQuestionIndex) {
-                            // Reset everything for the new question
                             setSubmissionStatus(null);
                             setAnswer('');
                             setTimer(QUESTION_DURATION_SECONDS);
@@ -601,7 +609,7 @@
                     }
                 });
                 return () => unsubscribe();
-            }, [GAME_STATE_DOC_REF, gameState?.currentQuestionIndex]);
+            }, [GAME_STATE_DOC_REF, gameState?.currentQuestionIndex, isAuthReady]); // Depend on isAuthReady
 
             // Timer logic
             useEffect(() => {
@@ -620,7 +628,7 @@
                     if (remaining <= 0) {
                         clearInterval(interval);
                         if (submissionStatus !== 'submitted') {
-                            setSubmissionStatus('timeout'); // Mark as timed out if they didn't submit
+                            setSubmissionStatus('timeout'); 
                         }
                     }
                 }, 100);
@@ -629,11 +637,11 @@
             }, [gameState, submissionStatus]);
 
             const handleJoin = useCallback(async () => {
-                if (!teamName.trim() || !TEAMS_COLLECTION_REF || !userId) return;
+                if (!teamName.trim() || !TEAMS_COLLECTION_REF || !userId || !isAuthReady) return; // Guard against not ready
 
                 try {
-                    const teamDocRef = TEAMS_COLLECTION_REF.doc(userId);
-                    await teamDocRef.set({
+                    const teamDocRef = TEAMS_COLLECTION_REF.doc(userId); // V8 API
+                    await teamDocRef.set({ // V8 API
                         teamName: teamName.trim(),
                         status: 'connected',
                         joinedAt: firebase.firestore.FieldValue.serverTimestamp(),
@@ -645,10 +653,10 @@
                 } catch (e) {
                     console.error("Error joining team:", e);
                 }
-            }, [teamName, TEAMS_COLLECTION_REF, userId]);
+            }, [teamName, TEAMS_COLLECTION_REF, userId, isAuthReady]);
 
             const handleSubmit = useCallback(async () => {
-                if (!answer.trim() || submissionStatus === 'submitted' || !SUBMISSIONS_COLLECTION_REF || !gameState || !teamName || !userId || !db) {
+                if (!answer.trim() || submissionStatus === 'submitted' || !SUBMISSIONS_COLLECTION_REF || !gameState || !teamName || !userId || !db || !isAuthReady) {
                     return;
                 }
                 
@@ -667,16 +675,17 @@
                 }
 
                 try {
-                    // Use transaction to ensure unique submission for the question
+                    // Use V8 transaction syntax
                     await db.runTransaction(async (transaction) => {
                         const q = SUBMISSIONS_COLLECTION_REF
                             .where('teamId', '==', userId)
                             .where('questionIndex', '==', gameState.currentQuestionIndex);
                         
+                        // Use transaction.get() and transaction.set() on the result/new doc ref
                         const snapshot = await transaction.get(q);
 
                         if (snapshot.empty) {
-                            const newDocRef = SUBMISSIONS_COLLECTION_REF.doc();
+                            const newDocRef = SUBMISSIONS_COLLECTION_REF.doc(); // V8 API
                             transaction.set(newDocRef, {
                                 teamId: userId,
                                 teamName: teamName,
@@ -694,7 +703,7 @@
                 } catch (e) {
                     console.error("Error submitting answer:", e);
                 }
-            }, [answer, submissionStatus, SUBMISSIONS_COLLECTION_REF, gameState, teamName, userId, db]); // FIX: Added db dependency
+            }, [answer, submissionStatus, SUBMISSIONS_COLLECTION_REF, gameState, teamName, userId, db, isAuthReady]); 
 
             const displayTimer = Math.floor(timer * 10) / 10;
             const isInputLocked = submissionStatus === 'submitted' || submissionStatus === 'timeout';
@@ -871,7 +880,7 @@
             const [role, setRole] = useState(null);
             const [error, setError] = useState(null);
 
-            // Use the adapted initialization function
+            // Use the refactored initialization function
             const { db, auth, userId, isAuthReady, GAME_STATE_DOC_REF, TEAMS_COLLECTION_REF, SUBMISSIONS_COLLECTION_REF } = useFirebaseInitialization();
 
             const handleAuth = () => {
@@ -925,6 +934,7 @@
                     <HostScreen
                         userId={userId}
                         db={db}
+                        isAuthReady={isAuthReady}
                         GAME_STATE_DOC_REF={GAME_STATE_DOC_REF}
                         TEAMS_COLLECTION_REF={TEAMS_COLLECTION_REF}
                         SUBMISSIONS_COLLECTION_REF={SUBMISSIONS_COLLECTION_REF}
@@ -937,6 +947,7 @@
                     <TeamScreen
                         userId={userId}
                         db={db}
+                        isAuthReady={isAuthReady}
                         GAME_STATE_DOC_REF={GAME_STATE_DOC_REF}
                         TEAMS_COLLECTION_REF={TEAMS_COLLECTION_REF}
                         SUBMISSIONS_COLLECTION_REF={SUBMISSIONS_COLLECTION_REF}
