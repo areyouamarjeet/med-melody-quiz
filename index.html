@@ -106,9 +106,8 @@
                                 setIsAuthReady(true);
                                 console.log("User authenticated:", user.uid);
                                 
-                                // Check and initialize game state
                                 const checkAndInitGameState = async () => {
-                                    if (!globalDb) return; // Re-check inside async function
+                                    if (!globalDb) return;
                                     try {
                                         const docSnap = await docRef.get();
                                         if (!docSnap.exists) {
@@ -211,69 +210,6 @@
             
             const [newQuestionText, setNewQuestionText] = useState('');
             
-            // Real-time listener for Game State
-            useEffect(() => {
-                if (!GAME_STATE_DOC_REF || !isAuthReady) return; // Guard against not ready
-                const unsubscribe = GAME_STATE_DOC_REF.onSnapshot((docSnap) => {
-                    if (docSnap.exists) {
-                        const state = docSnap.data();
-                        setGameState(state);
-                        
-                        if (state.status === 'lobby' || state.currentQuestionIndex === -1) {
-                            setNewQuestionText(`Song 1 Diagnosis?`);
-                        } else if (state.status !== 'question' && state.currentQuestionIndex < TOTAL_QUESTIONS) {
-                             setNewQuestionText(`Song ${state.currentQuestionIndex + 2} Diagnosis?`);
-                        }
-
-                    } else {
-                        console.error("Game state document not found.");
-                    }
-                });
-                return () => unsubscribe();
-            }, [GAME_STATE_DOC_REF, isAuthReady]); // Depend on GAME_STATE_DOC_REF and isAuthReady
-
-            // Real-time listener for Teams
-            useEffect(() => {
-                if (!TEAMS_COLLECTION_REF || !isAuthReady) return; // Guard against not ready
-                const unsubscribe = TEAMS_COLLECTION_REF.onSnapshot((snapshot) => {
-                    setTeams(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-                });
-                return () => unsubscribe();
-            }, [TEAMS_COLLECTION_REF, isAuthReady]); // Depend on TEAMS_COLLECTION_REF and isAuthReady
-
-            // Real-time listener for Submissions for the current question
-            useEffect(() => {
-                if (!SUBMISSIONS_COLLECTION_REF || !gameState || gameState.currentQuestionIndex === -1 || !isAuthReady) return; // Guard against not ready
-                
-                const q = SUBMISSIONS_COLLECTION_REF.where('questionIndex', '==', gameState.currentQuestionIndex);
-                
-                const unsubscribe = q.onSnapshot((snapshot) => {
-                    setSubmissions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-                });
-                return () => unsubscribe();
-            }, [SUBMISSIONS_COLLECTION_REF, gameState, isAuthReady]); // Depend on SUBMISSIONS_COLLECTION_REF, gameState, and isAuthReady
-
-            // Timer logic (uses local state, not Firebase objects)
-            useEffect(() => {
-                if (!gameState || gameState.status !== 'question' || !gameState.questionStartTime) {
-                    setTimer(QUESTION_DURATION_SECONDS);
-                    return;
-                }
-
-                const startTimestamp = gameState.questionStartTime.toMillis ? gameState.questionStartTime.toMillis() : gameState.questionStartTime;
-                const interval = setInterval(() => {
-                    const elapsed = Date.now() - startTimestamp;
-                    const remaining = QUESTION_DURATION_SECONDS - (elapsed / 1000);
-                    setTimer(Math.max(0, remaining));
-
-                    if (remaining <= 0) {
-                        clearInterval(interval);
-                    }
-                }, 100);
-
-                return () => clearInterval(interval);
-            }, [gameState]);
-
             const startNextQuestion = useCallback(async () => {
                 if (!GAME_STATE_DOC_REF || !db || !isAuthReady) return;
 
@@ -297,8 +233,8 @@
                 
                 const questionText = newQuestionText.trim() || `Song ${nextIndex + 1} Diagnosis?`;
                 
-                if (!questionText) {
-                    window.confirm("Please enter the question text before starting.");
+                if (nextIndex === 0 && !questionText) {
+                    window.confirm("Please enter the question text before starting the first question.");
                     return;
                 }
 
@@ -306,7 +242,7 @@
                     await GAME_STATE_DOC_REF.set({
                         status: 'question',
                         currentQuestionIndex: nextIndex,
-                        questionStartTime: Date.now(),
+                        questionStartTime: firebase.firestore.FieldValue.serverTimestamp(), // Use server timestamp for synchronization
                         currentQuestionText: questionText,
                         lastUpdate: firebase.firestore.FieldValue.serverTimestamp()
                     });
@@ -317,13 +253,97 @@
                 }
             }, [GAME_STATE_DOC_REF, gameState, newQuestionText, db, isAuthReady]);
 
+            // --- AUTO-ADVANCE LOGIC ---
+            useEffect(() => {
+                if (!gameState || gameState.status !== 'question' || !gameState.questionStartTime) {
+                    setTimer(QUESTION_DURATION_SECONDS);
+                    return;
+                }
+
+                const startTimestamp = gameState.questionStartTime.toMillis ? gameState.questionStartTime.toMillis() : gameState.questionStartTime;
+                let interval;
+                
+                const checkTimeAndAdvance = () => {
+                    const elapsed = Date.now() - startTimestamp;
+                    const remaining = QUESTION_DURATION_SECONDS - (elapsed / 1000);
+                    const currentTimerValue = Math.max(0, remaining);
+                    setTimer(currentTimerValue);
+
+                    if (currentTimerValue <= 0) {
+                        clearInterval(interval);
+                        
+                        // Check if we are at the end of the question list
+                        if (gameState.currentQuestionIndex < TOTAL_QUESTIONS - 1) {
+                            // Automatically advance to the next question after a brief delay
+                            setTimeout(() => {
+                                startNextQuestion(); 
+                            }, 500); 
+                        } else if (gameState.currentQuestionIndex === TOTAL_QUESTIONS - 1) {
+                            // End the quiz entirely
+                            setTimeout(() => {
+                                startNextQuestion(); // Call one last time to set status to 'results'
+                            }, 500);
+                        }
+                    }
+                };
+
+                interval = setInterval(checkTimeAndAdvance, 100);
+
+                checkTimeAndAdvance(); // Set initial timer state
+
+                return () => clearInterval(interval);
+            }, [gameState, startNextQuestion]);
+            // --- END AUTO-ADVANCE LOGIC ---
+
+            // Real-time listener for Game State
+            useEffect(() => {
+                if (!GAME_STATE_DOC_REF || !isAuthReady) return; 
+                const unsubscribe = GAME_STATE_DOC_REF.onSnapshot((docSnap) => {
+                    if (docSnap.exists) {
+                        const state = docSnap.data();
+                        setGameState(state);
+                        
+                        if (state.status === 'lobby' || state.currentQuestionIndex === -1) {
+                            setNewQuestionText(`Song 1 Diagnosis?`);
+                        } else if (state.currentQuestionIndex < TOTAL_QUESTIONS) {
+                             setNewQuestionText(`Song ${state.currentQuestionIndex + 2} Diagnosis?`);
+                        }
+
+                    } else {
+                        console.error("Game state document not found.");
+                    }
+                });
+                return () => unsubscribe();
+            }, [GAME_STATE_DOC_REF, isAuthReady]); 
+
+            // Real-time listener for Teams
+            useEffect(() => {
+                if (!TEAMS_COLLECTION_REF || !isAuthReady) return; 
+                const unsubscribe = TEAMS_COLLECTION_REF.onSnapshot((snapshot) => {
+                    setTeams(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+                });
+                return () => unsubscribe();
+            }, [TEAMS_COLLECTION_REF, isAuthReady]); 
+
+            // Real-time listener for Submissions for the current question
+            useEffect(() => {
+                if (!SUBMISSIONS_COLLECTION_REF || !gameState || gameState.currentQuestionIndex === -1 || !isAuthReady) return; 
+                
+                const q = SUBMISSIONS_COLLECTION_REF.where('questionIndex', '==', gameState.currentQuestionIndex);
+                
+                const unsubscribe = q.onSnapshot((snapshot) => {
+                    setSubmissions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+                });
+                return () => unsubscribe();
+            }, [SUBMISSIONS_COLLECTION_REF, gameState, isAuthReady]); 
+
+
             const resetGame = useCallback(async () => {
                 if (!GAME_STATE_DOC_REF || !SUBMISSIONS_COLLECTION_REF || !TEAMS_COLLECTION_REF || !db || !isAuthReady) return;
 
                 if (!window.confirm("Are you sure you want to reset the entire game (including all teams and submissions)?")) return;
 
                 try {
-                    // 1. Reset Game State
                     await GAME_STATE_DOC_REF.set({
                         status: 'lobby',
                         currentQuestionIndex: -1,
@@ -332,14 +352,12 @@
                         lastUpdate: firebase.firestore.FieldValue.serverTimestamp()
                     });
 
-                    // 2. Clear all submissions 
                     const qSubmissions = SUBMISSIONS_COLLECTION_REF;
                     const snapshotSubmissions = await qSubmissions.get(); 
                     const batchSubmissions = db.batch();
                     snapshotSubmissions.docs.forEach((doc) => batchSubmissions.delete(doc.ref));
                     await batchSubmissions.commit();
 
-                    // 3. Clear all teams
                     const qTeams = TEAMS_COLLECTION_REF;
                     const snapshotTeams = await qTeams.get();
                     const batchTeams = db.batch();
@@ -354,7 +372,6 @@
 
             const currentQuestionIndex = gameState?.currentQuestionIndex || -1;
             const isQuestionActive = gameState?.status === 'question' && timer > 0;
-            const isQuestionOver = gameState?.status === 'question' && timer <= 0;
             const isScreeningComplete = gameState?.status === 'results' && currentQuestionIndex === TOTAL_QUESTIONS;
             
             const displayTimer = Math.floor(timer * 10) / 10;
@@ -366,7 +383,6 @@
                     submission: submissions.find(s => s.teamId === t.id && s.questionIndex === currentQuestionIndex),
                 }));
                 
-                // Sort by submission time (fastest first)
                 return scores.sort((a, b) => {
                     const subA = a.submission;
                     const subB = b.submission;
@@ -374,25 +390,23 @@
                     if (subA && !subB) return -1; 
                     if (!subA && subB) return 1;  
                     if (!subA && !subB) return 0; 
-                    if (subA.timeTakenMs === subB.timeTakenMs) return 0;
-
-                    return subA.timeTakenMs - subB.timeTakenMs;
+                    if (subA && subB) return subA.timeTakenMs - subB.timeTakenMs;
+                    
+                    return a.name.localeCompare(b.name);
                 });
             }, [teams, submissions, currentQuestionIndex]);
             
             const questionHeader = gameState?.currentQuestionText.split(':')[0] || 'Screening Round';
-            const questionDetails = gameState?.currentQuestionText.split(':').slice(1).join(':').trim();
 
             if (!gameState) return <LoadingSpinner />;
 
-            const isNextButtonDisabled = isQuestionActive;
+            // Host button is ONLY enabled in the Lobby state (before Q1)
+            const isHostStartButtonDisabled = gameState.status !== 'lobby';
             const nextButtonText = gameState.status === 'lobby' 
                 ? 'Start Screening Round' 
                 : isScreeningComplete 
                 ? 'Screening Complete' 
-                : isQuestionActive 
-                ? `Waiting for Time Out (${currentQuestionIndex + 1}/${TOTAL_QUESTIONS})`
-                : `Start Q${currentQuestionIndex + 2} / ${TOTAL_QUESTIONS}`;
+                : `Quiz Running... Q${currentQuestionIndex + 1}/${TOTAL_QUESTIONS}`;
 
 
             return (
@@ -427,7 +441,7 @@
                                     <p className="text-xl">
                                         Question: <span className="font-bold text-[#E91E63]">{currentQuestionIndex + 1} / {TOTAL_QUESTIONS}</span>
                                     </p>
-                                    {(isQuestionActive || isQuestionOver || isScreeningComplete) && (
+                                    {(isQuestionActive || isScreeningComplete) && (
                                         <>
                                             <p className="text-lg">
                                                 Current Question: <span className="font-semibold text-[#263238]">{gameState.currentQuestionText}</span>
@@ -443,13 +457,13 @@
                                     <p className="text-base text-[#4CAF50] font-semibold">Remaining Time</p>
                                 </div>
                                 
-                                {/* Host Input for Next Question */}
-                                {!isScreeningComplete && gameState?.status !== 'question' && currentQuestionIndex < TOTAL_QUESTIONS && (
+                                {/* Host Input for Next Question (Only in Lobby) */}
+                                {gameState?.status === 'lobby' && (
                                     <div className="mb-6 space-y-3">
-                                        <h3 className="text-lg font-bold text-[#673AB7]">Set Next Question ({currentQuestionIndex + 2})</h3>
+                                        <h3 className="text-lg font-bold text-[#673AB7]">Set First Question Text</h3>
                                         <input
                                             type="text"
-                                            placeholder={`e.g., Song ${currentQuestionIndex + 2} Diagnosis?`}
+                                            placeholder={`e.g., Song 1 Diagnosis?`}
                                             value={newQuestionText}
                                             onChange={(e) => setNewQuestionText(e.target.value)}
                                             className="w-full p-2 rounded-md bg-[#ECEFF1] border border-[#B0BEC5] text-[#263238] placeholder-[#90A4AE]"
@@ -458,25 +472,17 @@
                                 )}
 
                                 <div className="flex flex-col space-y-3">
-                                    {currentQuestionIndex < TOTAL_QUESTIONS ? (
-                                        <button
-                                            onClick={startNextQuestion}
-                                            disabled={isNextButtonDisabled} // Disabled only when timer is running
-                                            className={`w-full py-3 rounded-lg text-lg font-bold transition-all duration-200 ${isNextButtonDisabled
-                                                ? 'bg-[#B0BEC5] text-[#455A64] cursor-not-allowed'
-                                                : 'bg-[#4CAF50] hover:bg-[#388E3C] active:bg-[#2E7D32] text-white shadow-md hover:shadow-[#4CAF50]/50'
-                                                }`}
-                                        >
-                                            {nextButtonText}
-                                        </button>
-                                    ) : (
-                                        <button
-                                            disabled
-                                            className="w-full py-3 rounded-lg text-lg font-bold bg-[#673AB7]/50 text-white cursor-not-allowed shadow-md"
-                                        >
-                                            Screening Complete!
-                                        </button>
-                                    )}
+                                    <button
+                                        onClick={startNextQuestion}
+                                        disabled={isHostStartButtonDisabled} // Disabled unless in lobby
+                                        className={`w-full py-3 rounded-lg text-lg font-bold transition-all duration-200 ${isHostStartButtonDisabled
+                                            ? 'bg-[#B0BEC5] text-[#455A64] cursor-not-allowed'
+                                            : 'bg-[#4CAF50] hover:bg-[#388E3C] active:bg-[#2E7D32] text-white shadow-md hover:shadow-[#4CAF50]/50'
+                                            }`}
+                                    >
+                                        {nextButtonText}
+                                    </button>
+                                    
                                     <button
                                         onClick={resetGame}
                                         className="w-full py-2 bg-[#F44336] hover:bg-[#D32F2F] active:bg-[#C62828] text-white rounded-lg text-sm font-semibold transition-all duration-200 shadow-md hover:shadow-[#F44336]/50"
@@ -558,7 +564,6 @@
                     return;
                 }
                 
-                // V8 Query syntax: where() returns a query, get() fetches data
                 const q = SUBMISSIONS_COLLECTION_REF
                     .where('teamId', '==', userId)
                     .where('questionIndex', '==', gameState.currentQuestionIndex);
@@ -571,7 +576,10 @@
                         if (!snapshot.empty) {
                             setSubmissionStatus('submitted');
                         } else {
-                            setSubmissionStatus(null);
+                            // Only reset status if the game is currently running a question
+                            if (gameState.status === 'question') {
+                                setSubmissionStatus(null);
+                            }
                         }
                     } catch (e) {
                          console.error("Error checking submission status:", e);
@@ -594,7 +602,7 @@
 
             // Real-time listener for Game State
             useEffect(() => {
-                if (!GAME_STATE_DOC_REF || !isAuthReady) return; // Guard against not ready
+                if (!GAME_STATE_DOC_REF || !isAuthReady) return; 
                 const unsubscribe = GAME_STATE_DOC_REF.onSnapshot((docSnap) => { // V8 API
                     if (docSnap.exists) {
                         const newState = docSnap.data();
@@ -609,7 +617,7 @@
                     }
                 });
                 return () => unsubscribe();
-            }, [GAME_STATE_DOC_REF, gameState?.currentQuestionIndex, isAuthReady]); // Depend on isAuthReady
+            }, [GAME_STATE_DOC_REF, gameState?.currentQuestionIndex, isAuthReady]); 
 
             // Timer logic
             useEffect(() => {
@@ -627,6 +635,7 @@
 
                     if (remaining <= 0) {
                         clearInterval(interval);
+                        // Mark as timed out if they didn't submit
                         if (submissionStatus !== 'submitted') {
                             setSubmissionStatus('timeout'); 
                         }
@@ -637,7 +646,7 @@
             }, [gameState, submissionStatus]);
 
             const handleJoin = useCallback(async () => {
-                if (!teamName.trim() || !TEAMS_COLLECTION_REF || !userId || !isAuthReady) return; // Guard against not ready
+                if (!teamName.trim() || !TEAMS_COLLECTION_REF || !userId || !isAuthReady) return; 
 
                 try {
                     const teamDocRef = TEAMS_COLLECTION_REF.doc(userId); // V8 API
@@ -656,7 +665,8 @@
             }, [teamName, TEAMS_COLLECTION_REF, userId, isAuthReady]);
 
             const handleSubmit = useCallback(async () => {
-                if (!answer.trim() || submissionStatus === 'submitted' || !SUBMISSIONS_COLLECTION_REF || !gameState || !teamName || !userId || !db || !isAuthReady) {
+                // Ensure all critical dependencies are available
+                if (!answer.trim() || submissionStatus === 'submitted' || submissionStatus === 'timeout' || !SUBMISSIONS_COLLECTION_REF || !gameState || !teamName || !userId || !db || !isAuthReady) {
                     return;
                 }
                 
@@ -664,6 +674,9 @@
                     window.confirm("Cannot submit: Quiz is not currently active.");
                     return;
                 }
+                
+                // Immediately lock the input/button to prevent double-click or continued typing
+                setSubmissionStatus('submitted'); 
 
                 const questionStartTime = gameState.questionStartTime.toMillis ? gameState.questionStartTime.toMillis() : gameState.questionStartTime;
                 const submissionTime = Date.now();
@@ -671,6 +684,7 @@
 
                 if (timeTakenMs < 0) {
                     console.error("Calculated time taken is negative, aborting submission.");
+                    setSubmissionStatus(null); // Unlock if aborting
                     return;
                 }
 
@@ -681,11 +695,10 @@
                             .where('teamId', '==', userId)
                             .where('questionIndex', '==', gameState.currentQuestionIndex);
                         
-                        // Use transaction.get() and transaction.set() on the result/new doc ref
                         const snapshot = await transaction.get(q);
 
                         if (snapshot.empty) {
-                            const newDocRef = SUBMISSIONS_COLLECTION_REF.doc(); // V8 API
+                            const newDocRef = SUBMISSIONS_COLLECTION_REF.doc(); // V8 API: creates a new document reference
                             transaction.set(newDocRef, {
                                 teamId: userId,
                                 teamName: teamName,
@@ -694,14 +707,16 @@
                                 timeTakenMs: timeTakenMs,
                                 timestamp: firebase.firestore.FieldValue.serverTimestamp(),
                             });
-                            setSubmissionStatus('submitted');
+                            // setSubmissionStatus('submitted'); // Already set outside for instant feedback
                         } else {
-                            setSubmissionStatus('submitted');
+                            // Submission already existed, keep status as submitted
                             console.warn("Submission already exists for this question.");
                         }
                     });
                 } catch (e) {
                     console.error("Error submitting answer:", e);
+                    // If transaction fails, revert local state to allow retries
+                    setSubmissionStatus(null); 
                 }
             }, [answer, submissionStatus, SUBMISSIONS_COLLECTION_REF, gameState, teamName, userId, db, isAuthReady]); 
 
@@ -709,13 +724,16 @@
             const isInputLocked = submissionStatus === 'submitted' || submissionStatus === 'timeout';
             const isScreeningComplete = gameState?.status === 'results' && gameState.currentQuestionIndex === TOTAL_QUESTIONS;
             
+            // Next button is disabled if status is not 'question' OR if the timer is still running
             const isNextButtonDisabled = gameState?.status !== 'question' || timer > 0;
-            const isSubmitButtonDisabled = isInputLocked || gameState?.status !== 'question' || answer.trim().length < 2;
+            
+            // Submit button is disabled if: Locked, Not in Question state, Answer is too short, OR Timer is zero/negative
+            const isSubmitButtonDisabled = isInputLocked || gameState?.status !== 'question' || answer.trim().length < 2 || timer <= 0;
 
             const submitButtonText = submissionStatus === 'submitted' 
                 ? 'Diagnosis Submitted' 
                 : submissionStatus === 'timeout' 
-                ? 'Time Expired' 
+                ? 'Time Expired (Wait for Advance)' 
                 : 'Submit Diagnosis';
                 
             const questionParts = gameState?.currentQuestionText ? gameState.currentQuestionText.split(':') : [];
@@ -771,7 +789,7 @@
                                         message="The Host is setting up the screening round. Please wait for the first song's diagnosis question to begin."
                                         icon={<svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-[#FFC107]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="12" y1="20" x2="12" y2="10"/></svg>}
                                     />
-                                    <p className="mt-6 text-xl text-[#607D8B] animate-pulse">Waiting for Host to Start Question 1...</p>
+                                    <p className="mt-6 text-xl text-[#607D8B] animate-pulse">Waiting for Host to Start Quiz...</p>
                                 </>
                             )}
                             {isScreeningComplete && (
@@ -813,13 +831,13 @@
 
                         {/* Input Area */}
                         <textarea
-                            placeholder={isInputLocked ? (submissionStatus === 'submitted' ? 'Waiting for the host to advance the question.' : 'Time is up! Wait for the host to advance.') : "Type your diagnosis here..."}
+                            placeholder={isInputLocked ? (submissionStatus === 'submitted' ? 'Waiting for the automatic advance to the next song.' : 'Time is up! Wait for the next question.') : "Type your diagnosis here..."}
                             value={answer}
                             onChange={(e) => setAnswer(e.target.value)}
-                            disabled={isInputLocked}
+                            disabled={isInputLocked || timer <= 0} // LOCK: If submitted or time is zero
                             rows="4"
                             className={`w-full p-4 mb-6 rounded-lg text-lg bg-[#ECEFF1] text-[#263238] placeholder-[#90A4AE] border-2 transition-all duration-300 shadow-inner
-                                ${isInputLocked ? 'opacity-70 cursor-not-allowed border-[#B0BEC5]' : 'border-[#4CAF50] focus:ring-[#4CAF50] focus:border-[#4CAF50]'}`
+                                ${isInputLocked || timer <= 0 ? 'opacity-70 cursor-not-allowed border-[#B0BEC5]' : 'border-[#4CAF50] focus:ring-[#4CAF50] focus:border-[#4CAF50]'}`
                             }
                         />
 
@@ -827,7 +845,7 @@
                             {/* Submission Button */}
                             <button
                                 onClick={handleSubmit}
-                                disabled={isSubmitButtonDisabled}
+                                disabled={isSubmitButtonDisabled} // LOCK: If submitted, time out, or invalid input/time <= 0
                                 className={`w-1/2 py-4 rounded-lg text-xl font-bold transition-all duration-200 shadow-lg
                                     ${isSubmitButtonDisabled
                                         ? 'bg-[#B0BEC5] text-[#455A64] cursor-not-allowed opacity-80'
@@ -837,11 +855,11 @@
                                 {submitButtonText}
                             </button>
                             
-                            {/* Next Button - Unlocked only after 60 seconds */}
+                            {/* Next Button - Unlocked only after 60 seconds (Auto Advance is now handled by Host) */}
                             <button
                                 onClick={() => {
                                     if (!isNextButtonDisabled) {
-                                        // The team clicking "Next" just clears their local UI state, waiting for the host's next broadcast.
+                                        // Clear local state if we are waiting for the next question
                                         setSubmissionStatus(null); 
                                         setAnswer(''); 
                                     }
@@ -860,12 +878,12 @@
 
                         {submissionStatus === 'submitted' && (
                             <p className="mt-4 text-center text-[#4CAF50] font-semibold">
-                                Response recorded! Waiting for the Host to start the next question.
+                                Response recorded! Waiting for the automatic advance to the next song.
                             </p>
                         )}
                         {submissionStatus === 'timeout' && (
                             <p className="mt-4 text-center text-[#E91E63] font-semibold">
-                                Time expired! Please wait for the Host to advance.
+                                Time expired! The quiz will automatically advance soon.
                             </p>
                         )}
                     </main>
